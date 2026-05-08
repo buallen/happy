@@ -134,6 +134,9 @@ const {
         if (args?.orderBy?.seq === "asc") {
             rows.sort((a, b) => a.seq - b.seq);
         }
+        if (args?.orderBy?.seq === "desc") {
+            rows.sort((a, b) => b.seq - a.seq);
+        }
         if (args?.orderBy?.createdAt === "desc") {
             rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
         }
@@ -278,39 +281,38 @@ describe("v3SessionRoutes", () => {
         expect(body.messages.map((message: any) => message.seq)).toEqual([1, 2]);
     });
 
-    it("supports cursor pagination with hasMore", async () => {
+    it("self-host: after_seq=0 returns the latest page only (hasMore=false)", async () => {
+        // Self-host branch behaviour: opening a session with the upstream
+        // client (which always sends `after_seq=0`) must not paginate
+        // through the entire history. Instead the server returns the
+        // newest `limit` messages in ASC order and lies about hasMore so
+        // the client stops paginating right away.
         seedSession({ id: "session-1", accountId: "user-1" });
         for (let seq = 1; seq <= 5; seq += 1) {
             seedMessage({ sessionId: "session-1", seq, localId: `l${seq}`, content: { t: "encrypted", c: String(seq) } });
         }
 
         app = await createApp();
-        const page1 = await app.inject({
+        const initialLoad = await app.inject({
             method: "GET",
             url: "/v3/sessions/session-1/messages?after_seq=0&limit=2",
             headers: { "x-user-id": "user-1" }
         });
-        const body1 = page1.json();
-        expect(body1.messages.map((message: any) => message.seq)).toEqual([1, 2]);
-        expect(body1.hasMore).toBe(true);
+        const initialBody = initialLoad.json();
+        expect(initialBody.messages.map((message: any) => message.seq)).toEqual([4, 5]);
+        expect(initialBody.hasMore).toBe(false);
 
-        const page2 = await app.inject({
-            method: "GET",
-            url: "/v3/sessions/session-1/messages?after_seq=2&limit=2",
-            headers: { "x-user-id": "user-1" }
-        });
-        const body2 = page2.json();
-        expect(body2.messages.map((message: any) => message.seq)).toEqual([3, 4]);
-        expect(body2.hasMore).toBe(true);
-
-        const page3 = await app.inject({
+        // Forward-sync path (after_seq > 0) is unchanged: the live socket
+        // pushes seq=N, the client polls `?after_seq=N-1` and only gets
+        // strictly newer messages.
+        const forward = await app.inject({
             method: "GET",
             url: "/v3/sessions/session-1/messages?after_seq=4&limit=2",
             headers: { "x-user-id": "user-1" }
         });
-        const body3 = page3.json();
-        expect(body3.messages.map((message: any) => message.seq)).toEqual([5]);
-        expect(body3.hasMore).toBe(false);
+        const forwardBody = forward.json();
+        expect(forwardBody.messages.map((message: any) => message.seq)).toEqual([5]);
+        expect(forwardBody.hasMore).toBe(false);
     });
 
     it("returns empty results for empty sessions and after_seq beyond latest", async () => {

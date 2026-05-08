@@ -74,6 +74,56 @@ export function v3SessionRoutes(app: Fastify) {
             return reply.code(404).send({ error: 'Session not found' });
         }
 
+        // SELF-HOST PATCH (do not upstream).
+        //
+        // The upstream mobile client always opens a session with
+        // `?after_seq=0` and then walks forward in 100-message pages until
+        // `hasMore=false`. For long sessions (thousands of messages) that
+        // means the chat list stays blank for many seconds while every
+        // page is fetched, decrypted, and reduced — the user cannot start
+        // typing until it's done.
+        //
+        // This branch flips the initial-load semantics on the server side
+        // only, so the unmodified upstream client gets a fast first paint
+        // without any app changes:
+        //
+        //   - When the client asks for `after_seq=0` (the initial-load
+        //     path), return only the *latest* `limit` messages and lie
+        //     about `hasMore=false`. The client merges them into the
+        //     reducer and stops paginating immediately.
+        //   - When `after_seq > 0` (the live forward-sync path used by
+        //     reconnect / socket-driven invalidate), behaviour is
+        //     unchanged so new messages still stream in normally.
+        //
+        // Trade-off: with this patch the unmodified client cannot see
+        // history older than the latest `limit` messages until the client
+        // gains a backward-pagination affordance (see PR #1242 upstream).
+        // That trade-off is the explicit reason this branch exists — fast
+        // session open is more valuable than full backscroll, *for now*.
+        const isInitialLoad = after_seq === 0;
+
+        if (isInitialLoad) {
+            // Pull the latest page in DESC order, then reverse so the
+            // client still sees ASC just like before.
+            const latest = await db.sessionMessage.findMany({
+                where: { sessionId },
+                orderBy: { seq: 'desc' },
+                take: limit,
+                select: {
+                    id: true,
+                    seq: true,
+                    content: true,
+                    localId: true,
+                    createdAt: true,
+                    updatedAt: true
+                }
+            });
+            return reply.send({
+                messages: latest.reverse().map(toResponseMessage),
+                hasMore: false
+            });
+        }
+
         const messages = await db.sessionMessage.findMany({
             where: {
                 sessionId,
